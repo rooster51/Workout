@@ -47,3 +47,8 @@ def test_program_has_every_week_and_day():
     assert {d.week for d in program.schedule}==set(range(1,11))
     assert "Reduce volume" in next(d.progression for d in program.schedule if d.week==4)
 
+def test_workout_item_tracks_completed_reps_separately():
+    workout=generate_workout(request(),seed="reps")
+    item=next(i for i in workout.items if i.section=="Main workout")
+    item.completed_reps=27
+    assert item.reps != "27" and item.completed_reps==27

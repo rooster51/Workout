@@ -8,7 +8,7 @@ import streamlit as st
 from workout_app.data import BY_ID, EQUIPMENT, EXERCISES, FOCUSES, GOALS
 from workout_app.generator import generate_program, generate_workout, replacement_for
 from workout_app.models import WorkoutRequest
-from workout_app.storage import load_history, load_programs, load_settings, save_history, save_programs, save_settings
+from workout_app.storage import cloud_ready, load_history, load_programs, load_settings, load_weights, save_history, save_programs, save_settings, save_weights
 
 st.set_page_config(page_title="Forge Fitness", page_icon="⚡", layout="centered", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -19,9 +19,23 @@ st.markdown("""<style>
 @media(max-width:600px){.block-container{padding-left:1rem;padding-right:1rem}h1{font-size:2rem!important}}
 </style>""", unsafe_allow_html=True)
 
-settings = load_settings()
-history = load_history()
-programs = load_programs()
+try:
+    auth_enabled = "auth" in st.secrets
+except Exception:
+    auth_enabled = False
+if auth_enabled and not st.user.is_logged_in:
+    st.title("Forge Fitness")
+    st.write("Sign in to keep your workouts, programs, and progress private and synced across devices.")
+    if st.button("Continue with Google", type="primary", use_container_width=True):
+        st.login("google")
+    st.stop()
+
+user_id = str(st.user.get("sub") or st.user.get("email")) if auth_enabled else "local-demo"
+display_name = str(st.user.get("name") or st.user.get("email") or "Demo user") if auth_enabled else "Demo user"
+settings = load_settings(user_id)
+history = load_history(user_id)
+programs = load_programs(user_id)
+weights = load_weights(user_id)
 for key, value in {"workout":None,"active_index":0,"page":"Home"}.items():
     st.session_state.setdefault(key, value)
 
@@ -60,16 +74,20 @@ def finish_workout(workout):
     record = workout.to_dict()
     record["completed_at"] = datetime.now().isoformat()
     record["total_volume"] = sum(i.sets * max(i.weight,0) for i in workout.items)
-    history.append(record); save_history(history)
+    history.append(record); save_history(history, user_id)
     st.session_state.workout = None; st.session_state.page = "Home"
     st.success("Workout saved. Nice work.")
 
-pages = ["Home","Build workout","Build program","Active workout","History","Progress","Exercises","Settings"]
+pages = ["Home","Build workout","Build program","Active workout","History","Weight tracker","Progress","Exercises","Settings"]
 page = st.sidebar.radio("Navigate", pages, index=pages.index(st.session_state.page) if st.session_state.page in pages else 0)
 st.session_state.page = page
+st.sidebar.caption(f"Signed in as {display_name}" if auth_enabled else "Local demo mode")
+if auth_enabled and st.sidebar.button("Sign out", use_container_width=True): st.logout()
 
 if page == "Home":
     st.markdown('<div class="eyebrow">TRAIN WITH INTENT</div>',unsafe_allow_html=True); st.title("Forge Fitness")
+    if not auth_enabled: st.warning("Demo mode: add Google and Firebase secrets to enable private multi-user accounts.")
+    elif not cloud_ready(): st.warning("Login is enabled, but Firebase storage still needs to be configured.")
     today = date.today(); week_start = today - timedelta(days=today.weekday())
     this_week = sum(datetime.fromisoformat(x.get("completed_at",x["created_at"])).date() >= week_start for x in history)
     c1,c2,c3 = st.columns(3); c1.metric("This week",this_week); c2.metric("Total",len(history)); c3.metric("Programs",len(programs))
@@ -95,7 +113,7 @@ elif page == "Build program":
     if st.button("Create my program",type="primary",use_container_width=True):
         try:
             program=generate_program(req,int(weeks),int(days),f"{date.today()}-{len(programs)}")
-            programs.append(program.to_dict()); save_programs(programs); st.session_state.selected_program=len(programs)-1; st.success("Program created and saved.")
+            programs.append(program.to_dict()); save_programs(programs, user_id); st.session_state.selected_program=len(programs)-1; st.success("Program created and saved.")
         except ValueError as error: st.error(str(error))
     if programs:
         selected=st.selectbox("Saved programs",range(len(programs)),format_func=lambda i: programs[i]["title"],index=st.session_state.get("selected_program",len(programs)-1))
@@ -113,6 +131,7 @@ elif page == "Active workout":
         st.progress((idx+1)/len(mains),text=f"Exercise {idx+1} of {len(mains)}"); st.title(item.name); st.markdown(f"## {item.sets} sets × {item.reps}"); st.caption(f"Rest {item.rest_seconds} seconds")
         for step in item.instructions: st.write(f"• {step}")
         item.completed_sets=st.number_input("Sets completed",0,item.sets,item.completed_sets,key=f"sets-{idx}")
+        item.completed_reps=st.number_input("Total repetitions completed",0,1000,item.completed_reps,key=f"reps-{idx}")
         item.weight=st.number_input("Weight used (optional)",0.0,1000.0,item.weight,step=2.5,key=f"weight-{idx}")
         item.rating=st.slider("Effort (1–10)",1,10,item.rating,key=f"rating-{idx}"); item.notes=st.text_input("Notes",item.notes,key=f"notes-{idx}"); item.pain=st.checkbox("Pain or discomfort",item.pain,key=f"pain-{idx}")
         c1,c2=st.columns(2)
@@ -128,6 +147,22 @@ elif page == "History":
             st.write(f"{record['duration']} minutes · {record['completion_percentage']}% complete")
             for item in record["items"]: st.write(f"{item['name']} — {item['sets']} × {item['reps']}")
 
+elif page == "Weight tracker":
+    st.title("Weight tracker")
+    with st.form("weight-entry", clear_on_submit=True):
+        c1,c2=st.columns(2); entry_date=c1.date_input("Date",date.today()); weight=c2.number_input("Body weight",1.0,1500.0,step=0.1)
+        note=st.text_input("Note (optional)")
+        if st.form_submit_button("Save weight",type="primary",use_container_width=True):
+            weights[:] = [x for x in weights if x["date"] != entry_date.isoformat()]
+            weights.append({"date":entry_date.isoformat(),"weight":weight,"note":note,"created_at":datetime.now().isoformat()})
+            weights.sort(key=lambda x:x["date"]); save_weights(weights,user_id); st.success("Weight saved."); st.rerun()
+    if weights:
+        weight_frame=pd.DataFrame(weights); weight_frame["date"]=pd.to_datetime(weight_frame["date"]); weight_frame=weight_frame.sort_values("date").set_index("date"); weight_frame["7-day average"]=weight_frame["weight"].rolling(7,min_periods=1).mean()
+        latest=float(weight_frame["weight"].iloc[-1]); start=float(weight_frame["weight"].iloc[0]); goal=settings.get("goal_weight",0.0)
+        c1,c2,c3=st.columns(3); c1.metric("Latest",f"{latest:.1f}"); c2.metric("Change",f"{latest-start:+.1f}"); c3.metric("Goal",f"{goal:.1f}" if goal else "Not set")
+        st.line_chart(weight_frame[["weight","7-day average"]]); st.dataframe(weight_frame.reset_index().sort_values("date",ascending=False),use_container_width=True,hide_index=True)
+    else: st.info("Add your first weight entry to begin tracking trends.")
+
 elif page == "Progress":
     st.title("Progress")
     if not history: st.info("Charts appear after your first completed workout.")
@@ -141,6 +176,16 @@ elif page == "Progress":
                 if item["section"]=="Main workout":
                     for muscle in item["muscles"]: muscle_counts[muscle]=muscle_counts.get(muscle,0)+1
         st.subheader("Most-trained muscles"); st.bar_chart(pd.Series(muscle_counts).sort_values(ascending=False).head(8))
+        performance=[]
+        for workout in history:
+            completed_at=pd.to_datetime(workout.get("completed_at",workout["created_at"]))
+            for item in workout["items"]:
+                if item.get("weight",0)>0 and item.get("completed_sets",0)>0:
+                    performance.append({"date":completed_at,"exercise":item["name"],"weight":item["weight"],"volume":item["weight"]*item["completed_sets"]*max(item.get("completed_reps",0),1)})
+        if performance:
+            perf=pd.DataFrame(performance); selected_exercise=st.selectbox("Exercise progress",sorted(perf.exercise.unique())); selected_perf=perf[perf.exercise==selected_exercise].set_index("date")
+            c1,c2=st.columns(2); c1.metric("Best weight",f"{selected_perf.weight.max():.1f}"); c2.metric("Best volume",f"{selected_perf.volume.max():,.0f}")
+            st.line_chart(selected_perf[["weight","volume"]])
 
 elif page == "Exercises":
     st.title("Exercise library"); search=st.text_input("Search"); muscle=st.selectbox("Muscle",["All"]+sorted({m for e in EXERCISES for m in e.muscles}))
@@ -156,7 +201,7 @@ elif page == "Settings":
     st.title("Settings")
     equipment=st.multiselect("Default equipment",EQUIPMENT,default=settings["equipment"]); duration=st.select_slider("Default minutes",[10,15,20,30,45,60],value=settings["duration"])
     difficulty=st.selectbox("Default difficulty",["Beginner","Intermediate","Advanced"],index=["Beginner","Intermediate","Advanced"].index(settings["difficulty"])); low_impact=st.toggle("Low-impact mode",settings["low_impact"])
+    c1,c2=st.columns(2); start_weight=c1.number_input("Starting weight",0.0,1500.0,float(settings.get("start_weight",0.0)),step=0.1); goal_weight=c2.number_input("Goal weight",0.0,1500.0,float(settings.get("goal_weight",0.0)),step=0.1)
     disabled_names=st.multiselect("Exercises to exclude",[e.name for e in EXERCISES],default=[BY_ID[i].name for i in settings["disabled"] if i in BY_ID])
     if st.button("Save settings",type="primary",use_container_width=True):
-        settings.update(equipment=equipment or ["No equipment"],duration=duration,difficulty=difficulty,low_impact=low_impact,disabled=[e.id for e in EXERCISES if e.name in disabled_names]); save_settings(settings); st.success("Settings saved.")
-
+        settings.update(equipment=equipment or ["No equipment"],duration=duration,difficulty=difficulty,low_impact=low_impact,start_weight=start_weight,goal_weight=goal_weight,disabled=[e.id for e in EXERCISES if e.name in disabled_names]); save_settings(settings,user_id); st.success("Settings saved.")

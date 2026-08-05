@@ -49,6 +49,7 @@ class WorkoutItem:
     equipment: tuple[str, ...]
     pattern: str
     completed_sets: int = 0
+    completed_reps: int = 0
     weight: float = 0.0
     rating: int = 7
     notes: str = ""
@@ -96,4 +97,3 @@ class Program:
 
     def to_dict(self) -> dict:
         return asdict(self)
-
