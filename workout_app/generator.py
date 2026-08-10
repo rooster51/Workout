@@ -24,6 +24,21 @@ PATTERNS = {
 }
 DIFFICULTY_RANK = {"Beginner": 0, "Intermediate": 1, "Advanced": 2}
 
+GOAL_EXPLANATIONS = {
+    "Lose fat": "This session uses large-muscle movements and short rests to keep work density high while maintaining useful strength work.",
+    "Gain muscle": "This session emphasizes controlled resistance work in a muscle-building repetition range with enough rest to keep each set productive.",
+    "Build strength": "This session prioritizes compound movement patterns, lower repetitions, and longer recovery so you can produce high-quality effort.",
+    "Improve endurance": "This session combines repeated movement with shorter recovery to build your ability to sustain effort over time.",
+    "Calisthenics": "This session develops body control through scalable push, pull, lower-body, and core patterns.",
+    "Mobility and recovery": "This low-intensity session uses controlled range-of-motion work and breathing to support recovery without adding heavy fatigue.",
+    "Improve general fitness": "This balanced session trains strength, movement quality, and work capacity without overemphasizing one quality.",
+}
+
+def workout_explanation(request: WorkoutRequest, patterns: list[str]) -> str:
+    pattern_text = ", ".join(dict.fromkeys(pattern.lower() for pattern in patterns[:5]))
+    goal_text = GOAL_EXPLANATIONS.get(request.goal, GOAL_EXPLANATIONS["Improve general fitness"])
+    return f"{goal_text} For this {request.focus.lower()} workout, the main work covers {pattern_text}. The warm-up prepares those patterns and the cooldown gradually brings the session down."
+
 
 def _rng(seed: str | int | None) -> random.Random:
     if seed is None: return random.Random()
@@ -90,7 +105,8 @@ def generate_workout(request: WorkoutRequest, seed: str | int | None = None, *, 
         sets, reps, rest = _prescription(request, section, week)
         items.extend(WorkoutItem(e.id,e.name,section,sets,reps,rest,e.instructions,e.muscles,e.equipment,e.pattern) for e in exercises)
     now = datetime.now(timezone.utc).isoformat()
-    return Workout(str(uuid4()),f"{request.focus} • {request.goal}",now,request.goal,request.focus,request.duration,request.difficulty,request.intensity,request.equipment,items)
+    explanation = workout_explanation(request, [exercise.pattern for exercise in chosen])
+    return Workout(str(uuid4()),f"{request.focus} • {request.goal}",now,request.goal,request.focus,request.duration,request.difficulty,request.intensity,request.equipment,items,explanation=explanation)
 
 
 def replacement_for(item: WorkoutItem, request: WorkoutRequest, seed: str | int | None = None):
@@ -119,5 +135,6 @@ def generate_program(request: WorkoutRequest, weeks: int, days_per_week: int, se
 
 
 def workout_from_dict(data: dict) -> Workout:
-    return Workout(items=[WorkoutItem(**item) for item in data.pop("items")], **data)
-
+    payload = dict(data)
+    raw_items = payload.pop("items", [])
+    return Workout(items=[WorkoutItem(**item) for item in raw_items], **payload)

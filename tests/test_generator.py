@@ -52,3 +52,15 @@ def test_workout_item_tracks_completed_reps_separately():
     item=next(i for i in workout.items if i.section=="Main workout")
     item.completed_reps=27
     assert item.reps != "27" and item.completed_reps==27
+
+def test_generated_workout_explains_its_structure():
+    workout=generate_workout(request(goal="Build strength"),seed="explanation")
+    assert "compound" in workout.explanation.lower()
+    assert workout.focus.lower() in workout.explanation.lower()
+
+def test_workout_from_dict_does_not_mutate_saved_program_data():
+    from workout_app.generator import workout_from_dict
+    workout=generate_workout(request(),seed="saved")
+    saved=workout.to_dict()
+    restored=workout_from_dict(saved)
+    assert saved["items"] and restored.items[0].name==saved["items"][0]["name"]

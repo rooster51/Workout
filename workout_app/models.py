@@ -68,6 +68,7 @@ class Workout:
     intensity: str
     equipment: tuple[str, ...]
     items: list[WorkoutItem]
+    explanation: str = ""
     completed: bool = False
     completion_percentage: int = 0
 
@@ -82,6 +83,8 @@ class ProgramDay:
     label: str
     workout: Workout
     progression: str
+    completed: bool = False
+    completed_at: str | None = None
 
 
 @dataclass

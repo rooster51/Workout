@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from workout_app.data import BY_ID, EQUIPMENT, EXERCISES, FOCUSES, GOALS
-from workout_app.generator import generate_program, generate_workout, replacement_for
+from workout_app.generator import GOAL_EXPLANATIONS, generate_program, generate_workout, replacement_for, workout_from_dict
 from workout_app.models import WorkoutRequest
 from workout_app.storage import cloud_ready, load_history, load_programs, load_settings, load_weights, save_history, save_programs, save_settings, save_weights
 
@@ -36,7 +36,7 @@ settings = load_settings(user_id)
 history = load_history(user_id)
 programs = load_programs(user_id)
 weights = load_weights(user_id)
-for key, value in {"workout":None,"active_index":0,"page":"Home"}.items():
+for key, value in {"workout":None,"active_index":0,"page":"Home","program_context":None}.items():
     st.session_state.setdefault(key, value)
 
 def request_form(prefix: str):
@@ -52,6 +52,7 @@ def request_form(prefix: str):
 def render_workout(workout, interactive=True):
     st.subheader(workout.title)
     st.caption(f"{workout.duration} min · {workout.difficulty} · {workout.intensity} · {', '.join(workout.equipment)}")
+    st.info(workout.explanation or GOAL_EXPLANATIONS.get(workout.goal, "This workout is structured around your selected goal, focus, equipment, and available time."))
     for section in ("Warm-up","Main workout","Finisher","Cooldown"):
         items = [item for item in workout.items if item.section == section]
         if not items: continue
@@ -75,10 +76,22 @@ def finish_workout(workout):
     record["completed_at"] = datetime.now().isoformat()
     record["total_volume"] = sum(i.sets * max(i.weight,0) for i in workout.items)
     history.append(record); save_history(history, user_id)
+    context = st.session_state.program_context
+    if context:
+        for program in programs:
+            if program.get("id") != context["program_id"]: continue
+            for day in program.get("schedule", []):
+                if day.get("week") == context["week"] and day.get("day") == context["day"]:
+                    day["completed"] = True
+                    day["completed_at"] = record["completed_at"]
+                    day["workout"] = record
+                    break
+        save_programs(programs, user_id)
+    st.session_state.program_context = None
     st.session_state.workout = None; st.session_state.page = "Home"
     st.success("Workout saved. Nice work.")
 
-pages = ["Home","Build workout","Build program","Active workout","History","Weight tracker","Progress","Exercises","Settings"]
+pages = ["Home","My programs","Build workout","Build program","Active workout","History","Weight tracker","Progress","Exercises","Settings"]
 page = st.sidebar.radio("Navigate", pages, index=pages.index(st.session_state.page) if st.session_state.page in pages else 0)
 st.session_state.page = page
 st.sidebar.caption(f"Signed in as {display_name}" if auth_enabled else "Local demo mode")
@@ -93,6 +106,7 @@ if page == "Home":
     c1,c2,c3 = st.columns(3); c1.metric("This week",this_week); c2.metric("Total",len(history)); c3.metric("Programs",len(programs))
     if st.button("⚡ Build today's workout",type="primary",use_container_width=True): st.session_state.page="Build workout"; st.rerun()
     if st.button("📆 Create an X-week program",use_container_width=True): st.session_state.page="Build program"; st.rerun()
+    if programs and st.button("📋 Continue a saved program",use_container_width=True): st.session_state.page="My programs"; st.rerun()
     if history:
         last=history[-1]; st.subheader("Last workout"); st.write(f"**{last['title']}** · {last['duration']} minutes · {last.get('completion_percentage',100)}% complete")
     else: st.info("Your completed workouts and progress will appear here.")
@@ -104,7 +118,7 @@ elif page == "Build workout":
         except ValueError as error: st.error(str(error))
     if st.session_state.workout:
         render_workout(st.session_state.workout)
-        if st.button("Start workout",type="primary",use_container_width=True): st.session_state.active_index=0; st.session_state.page="Active workout"; st.rerun()
+        if st.button("Start workout",type="primary",use_container_width=True): st.session_state.program_context=None; st.session_state.active_index=0; st.session_state.page="Active workout"; st.rerun()
 
 elif page == "Build program":
     st.title("Build an X-week plan"); st.write("Every plan includes progressive build weeks and a lighter recovery week every fourth week.")
@@ -115,13 +129,38 @@ elif page == "Build program":
             program=generate_program(req,int(weeks),int(days),f"{date.today()}-{len(programs)}")
             programs.append(program.to_dict()); save_programs(programs, user_id); st.session_state.selected_program=len(programs)-1; st.success("Program created and saved.")
         except ValueError as error: st.error(str(error))
-    if programs:
-        selected=st.selectbox("Saved programs",range(len(programs)),format_func=lambda i: programs[i]["title"],index=st.session_state.get("selected_program",len(programs)-1))
-        program=programs[selected]; week=st.selectbox("View week",range(1,program["weeks"]+1))
-        for day in [d for d in program["schedule"] if d["week"]==week]:
-            with st.expander(day["label"],expanded=day["day"]==1):
+    if programs and st.button("Open My programs",use_container_width=True): st.session_state.page="My programs"; st.rerun()
+
+elif page == "My programs":
+    st.title("My programs")
+    st.write("Open a saved plan, choose your current week, and start the next workout. Completed days remain checked across devices.")
+    if not programs:
+        st.info("You have not created a program yet.")
+        if st.button("Build my first program",type="primary",use_container_width=True): st.session_state.page="Build program"; st.rerun()
+    else:
+        selected=st.selectbox("Program",range(len(programs)),format_func=lambda i: programs[i]["title"],index=min(st.session_state.get("selected_program",len(programs)-1),len(programs)-1))
+        program=programs[selected]; st.session_state.selected_program=selected
+        completed=sum(bool(day.get("completed")) for day in program.get("schedule",[])); total=len(program.get("schedule",[]))
+        st.progress(completed/max(total,1),text=f"{completed} of {total} workouts completed")
+        st.caption(f"{program['weeks']} weeks · {program['days_per_week']} days per week · {program['goal']} · {program['focus']}")
+        incomplete=[day for day in program.get("schedule",[]) if not day.get("completed")]
+        suggested_week=incomplete[0]["week"] if incomplete else program["weeks"]
+        week=st.selectbox("Week",range(1,program["weeks"]+1),index=suggested_week-1,key=f"program-week-{program['id']}")
+        for day in [entry for entry in program.get("schedule",[]) if entry["week"]==week]:
+            status="Completed" if day.get("completed") else "Planned"
+            with st.expander(f"{day['label']} · {status}",expanded=not day.get("completed")):
+                workout_data=day["workout"]
+                st.write(workout_data.get("explanation") or GOAL_EXPLANATIONS.get(workout_data.get("goal"),"This workout supports the goal and focus selected for your program."))
                 st.caption(day["progression"])
-                for item in day["workout"]["items"]: st.write(f"**{item['section']}** · {item['name']} — {item['sets']} × {item['reps']}")
+                for section in ("Warm-up","Main workout","Cooldown"):
+                    section_items=[item for item in workout_data.get("items",[]) if item["section"]==section]
+                    if section_items:
+                        st.markdown(f"**{section}**")
+                        for item in section_items: st.write(f"{item['name']} — {item['sets']} × {item['reps']}")
+                if not day.get("completed") and st.button("Start this workout",type="primary",use_container_width=True,key=f"start-{program['id']}-{day['week']}-{day['day']}"):
+                    st.session_state.workout=workout_from_dict(workout_data)
+                    st.session_state.program_context={"program_id":program["id"],"week":day["week"],"day":day["day"]}
+                    st.session_state.active_index=0; st.session_state.page="Active workout"; st.rerun()
 
 elif page == "Active workout":
     workout=st.session_state.workout
